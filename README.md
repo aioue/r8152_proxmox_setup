@@ -1,4 +1,4 @@
-## One-shot, safe installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware)
+## One-shot installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware)
 
 Gets USB dongles like the [Wisdpi WP-UT5 (RTL8157) 5GbE](https://www.wisdpi.com/products/wisdpi-usb-3-2-5g-ethernet-adapter-wp-ut5-wired-lan-network-connection-for-mac-os-linux-windows-backward-compatible-on-5g-2-5g-1g-100mbps-ideal-for-gaming) running cleanly on PVE 9 using the [awesometic](https://github.com/awesometic/realtek-r8152-dkms/) r8152 DKMS driver (`.deb` package), with Secure Boot MOK enrollment and automatic `cdc_*` blacklisting.
 
