@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # r8152_proxmox_setup.sh
+# Copyright (c) 2025 Tom Paine (https://github.com/aioue)
+# Licensed under the MIT License. See https://opensource.org/licenses/MIT
+#
 # One-shot, safe installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware)
 # - Uses awesometic .deb from /root/ or auto-fetches the latest from GitHub
 # - Preserves access by temporarily moving vmbr0 to onboard NIC (enp3s0) if needed
