@@ -192,9 +192,9 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
 
 ASrock DeskMini X300, Wisdpi plugged into rear USB - **USB 3.2 Gen1 Type-A** (5Gbps)
 
-Negible difference with irqbalance.
-
 **iperf3:** 3.2-3.4 Gbps
+
+Negible difference with irqbalance.
 
 Very happy. This is realistically as close to perfect as the dongle will get on Gen1 USB port. (Expect 4.0-4.6Gbps on a 3.2 Gen2 port) 
 
