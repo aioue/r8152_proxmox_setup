@@ -188,6 +188,12 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
   ```
 </details>
 
+### Observed Performance
+
+Negible difference with irqbalance.
+
+**iperf3:** 3.2-3.4 Gbps
+
 ### Wisdpi USB Adapter Features
 
 ```bash
