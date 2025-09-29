@@ -4,6 +4,11 @@ Gets USB dongles like the [Wisdpi WP-UT5 (RTL8157) 5GbE](https://www.wisdpi.com/
 
 If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](https://github.com/wget/realtek-r8152-linux) of r8152 DKMS. With MOK already enrolled, it should load cleanly as well.
 
+**Notes**
+- The script blacklists cdc_ncm, cdc_ether, r8153_ecm and updates initramfs so r8152 binds first.
+- If Secure Boot is enabled, you’ll be prompted to enroll the DKMS key (MOK) and reboot once; rerun the script after the reboot to complete.
+- Requires onboard NIC (default enp3s0) to be cabled during the switch so management stays up.
+
 ## Script Output
 <details>
   <summary>(click to expand) 📝</summary>
