@@ -5,7 +5,7 @@ Gets USB dongles like the Wisdpi WP-UT5 (RTL8157) 5GbE running cleanly on PVE 9 
 If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](https://github.com/wget/realtek-r8152-linux) of r8152 DKMS. With MOK already enrolled, it should load cleanly as well.
 
 <details>
-  <summary>Script output 📝</summary>
+  <summary>Script output (click to expand) 📝</summary>
   
   ```bash
   # ./r8152_proxmox_setup.sh 
