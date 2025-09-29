@@ -1,11 +1,12 @@
-One-shot, safe installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware).
+## One-shot, safe installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware).
 
 Gets USB dongles like the [Wisdpi WP-UT5 (RTL8157) 5GbE](https://www.wisdpi.com/products/wisdpi-usb-3-2-5g-ethernet-adapter-wp-ut5-wired-lan-network-connection-for-mac-os-linux-windows-backward-compatible-on-5g-2-5g-1g-100mbps-ideal-for-gaming) running cleanly on PVE 9 using the [awesometic](https://github.com/awesometic/realtek-r8152-dkms/) r8152 DKMS driver (`.deb` package), with Secure Boot MOK enrollment and automatic `cdc_*` blacklisting.
 
 If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](https://github.com/wget/realtek-r8152-linux) of r8152 DKMS. With MOK already enrolled, it should load cleanly as well.
 
+## Script Output
 <details>
-  <summary>Script output (click to expand) 📝</summary>
+  <summary>(click to expand) 📝</summary>
   
   ```bash
   # ./r8152_proxmox_setup.sh 
@@ -188,9 +189,9 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
   ```
 </details>
 
-### Observed Performance
+## Observed Performance
 
-ASrock DeskMini X300, Wisdpi plugged into rear USB - `USB 3.2 Gen1 Type-A (5Gbps)`
+ASRock DeskMini X300, [custom BIOS 2.10B](https://drive.google.com/drive/u/0/folders/1nJV-svR1Qp8UnVriRvlruy3rCk_Y-K_E) (ACS/IOMMU enabled) Wisdpi plugged into rear USB - `USB 3.2 Gen1 Type-A (5Gbps)`
 
 **iperf3:** `3.2-3.4 Gbps`
 
@@ -200,7 +201,7 @@ Negible difference with irqbalance.
 
 (Expect 4.0-4.6Gbps on a 3.2 Gen2 port) 
 
-### Wisdpi USB Adapter Features
+## Wisdpi USB Adapter Features
 
 ```bash
 root@pve:~# ethtool -k enxXXXXXXXXXXXX
