@@ -29,7 +29,7 @@ say() { printf "\n==> %s\n" "$*"; }
 note() { printf "    - %s\n" "$*"; }
 die() { printf "ERROR: %s\n" "$*" >&2; exit 1; }
 
-# ---------- Possibly fetch latest .deb from GitHub ----------
+# ---------- fetch latest .deb from GitHub ----------
 fetch_latest_deb_if_needed() {
   if [[ -f "$DEB_PATH" ]]; then
     return 0
