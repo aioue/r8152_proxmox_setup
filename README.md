@@ -196,7 +196,7 @@ ASrock DeskMini X300, Wisdpi plugged into rear USB - **USB 3.2 Gen1 Type-A** (5G
 
 Negible difference with irqbalance.
 
-Very happy. This is realistically as close to perfect as the dongle will get on Gen1 USB port. (Expect 4.0-4.6Gbps on a 3.2 Gen2 port) 
+Very happy. **This is realistically as close to perfect as the dongle will get on Gen1 USB port.** (Expect 4.0-4.6Gbps on a 3.2 Gen2 port) 
 
 ### Wisdpi USB Adapter Features
 
