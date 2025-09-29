@@ -6,6 +6,7 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
 
 <details>
   <summary>Script output</summary>
+  
   ```bash
   # ./r8152_proxmox_setup.sh 
 
