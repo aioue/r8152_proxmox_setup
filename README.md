@@ -191,7 +191,7 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
 
 ## Observed Performance
 
-ASRock DeskMini X300, [custom BIOS 2.10B](https://drive.google.com/drive/u/0/folders/1nJV-svR1Qp8UnVriRvlruy3rCk_Y-K_E) (ACS/IOMMU enabled) Wisdpi plugged into rear USB - `USB 3.2 Gen1 Type-A (5Gbps)`
+[ASRock DeskMini X300](https://www.asrock.com/nettop/AMD/DeskMini%20X300%20Series/index.asp), [custom BIOS 2.10B](https://drive.google.com/drive/u/0/folders/1nJV-svR1Qp8UnVriRvlruy3rCk_Y-K_E) (ACS/IOMMU enabled) Wisdpi plugged into rear USB - `USB 3.2 Gen1 Type-A (5Gbps)`
 
 **iperf3:** `3.2-3.4 Gbps`
 
