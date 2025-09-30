@@ -110,6 +110,21 @@ detect_usb_if() {
   return 1
 }
 
+# ---------- Early validation: onboard NIC must be available for failover ----------
+say "Verifying onboard interface $ONBOARD_IF is available for failover"
+[[ -e "/sys/class/net/$ONBOARD_IF" ]] || die "Onboard interface $ONBOARD_IF not found; adjust script variable."
+
+# Check link state - failover path must be viable if we need it
+if [[ -r "/sys/class/net/$ONBOARD_IF/carrier" ]]; then
+  CARRIER="$(cat /sys/class/net/$ONBOARD_IF/carrier 2>/dev/null || echo 0)"
+  if [[ "$CARRIER" != "1" ]]; then
+    die "Onboard interface $ONBOARD_IF has no link (cable unplugged?). Cannot safely switch bridge if needed. Connect $ONBOARD_IF and rerun."
+  fi
+  note "Onboard interface $ONBOARD_IF has link - failover path available"
+else
+  note "Warning: Cannot verify link state of $ONBOARD_IF (interface may be down)"
+fi
+
 current_usb_if="$(detect_usb_if || true)"
 
 say "Detecting existing interfaces"
@@ -120,43 +135,8 @@ else
   note "USB Realtek interface not currently bound (will probe after install)."
 fi
 
-# ---------- Safety: ensure vmbr0 can fail over to onboard during driver switch ----------
-say "Ensuring vmbr0 can use $ONBOARD_IF during driver switch"
-[[ -e "/sys/class/net/$ONBOARD_IF" ]] || die "Onboard interface $ONBOARD_IF not found; adjust script variable."
-
 IFCFG="/etc/network/interfaces"
 cp -a "$IFCFG" "${IFCFG}.r8152.backup.$(date +%Y%m%d_%H%M%S)"
-
-vmbr_port="$(awk '
-  BEGIN{inbr=0;port=""}
-  /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1; next}
-  inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {
-     for (i=2;i<=NF;i++) if ($i!="bridge-ports") {port=$i; break}
-     print port; exit
-  }
-' "$IFCFG")"
-
-note "vmbr0 current bridge-port: ${vmbr_port:-<none>}"
-
-if [[ -n "${vmbr_port:-}" && "$vmbr_port" != "$ONBOARD_IF" ]]; then
-  say "Temporarily switching vmbr0 bridge-port to $ONBOARD_IF for safety"
-  awk -v onb="$ONBOARD_IF" '
-    BEGIN{inbr=0}
-    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
-    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " onb}
-    {print}
-  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
-  ifreload -a || true
-  sleep 2
-  ip -br link | sed 's/^/    /'
-else
-  note "vmbr0 already on $ONBOARD_IF (or no change needed)."
-fi
-
-grep -q "^iface ${ONBOARD_IF} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$ONBOARD_IF" >>"$IFCFG"
-if [[ -n "${current_usb_if:-}" ]]; then
-  grep -q "^iface ${current_usb_if} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$current_usb_if" >>"$IFCFG"
-fi
 
 # ---------- Install headers, DKMS package ----------
 say "Installing headers, DKMS, and the r8152 DKMS package"
@@ -255,12 +235,48 @@ modprobe r8152
 new_usb_if="$(detect_usb_if || true)"
 
 if [[ -n "${new_usb_if:-}" ]]; then
-  # Device already bound and working - skip replug
+  # Device already bound and working - skip replug AND bridge switching
   note "USB NIC already bound to r8152: $new_usb_if"
-  note "Skipping replug step (device is already working)"
+  note "Skipping replug and bridge switch (device is already working)"
 else
   # Device not bound to r8152 - need replug for initial setup
-  say "USB NIC not currently bound to r8152"
+  # Only now do we need to switch bridge to onboard for safety
+  
+  say "USB NIC not currently bound to r8152 - initial setup required"
+  
+  # Get current bridge port and switch to onboard if needed
+  vmbr_port="$(awk '
+    BEGIN{inbr=0;port=""}
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1; next}
+    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {
+       for (i=2;i<=NF;i++) if ($i!="bridge-ports") {port=$i; break}
+       print port; exit
+    }
+  ' "$IFCFG")"
+  
+  note "vmbr0 current bridge-port: ${vmbr_port:-<none>}"
+  
+  if [[ -n "${vmbr_port:-}" && "$vmbr_port" != "$ONBOARD_IF" ]]; then
+    say "Temporarily switching vmbr0 bridge-port to $ONBOARD_IF for safety during replug"
+    awk -v onb="$ONBOARD_IF" '
+      BEGIN{inbr=0}
+      /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
+      inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " onb}
+      {print}
+    ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+    ifreload -a || true
+    sleep 2
+    ip -br link | sed 's/^/    /'
+  else
+    note "vmbr0 already on $ONBOARD_IF (or no change needed)."
+  fi
+  
+  # Ensure interface definitions exist
+  grep -q "^iface ${ONBOARD_IF} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$ONBOARD_IF" >>"$IFCFG"
+  if [[ -n "${current_usb_if:-}" ]]; then
+    grep -q "^iface ${current_usb_if} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$current_usb_if" >>"$IFCFG"
+  fi
+  
   say "ACTION REQUIRED: Unplug and replug the Realtek USB 5G NIC now, then press Enter."
   read -r -p "Press Enter after replug..."
   
@@ -290,31 +306,37 @@ else
     echo "  - Try waiting 30 seconds for STP convergence, then rerun" >&2
     exit 1
   fi
+  
+  say "USB NIC bound to r8152 on interface: $new_usb_if"
+  ethtool -i "$new_usb_if" | sed 's/^/    /'
+  
+  # ---------- Restore vmbr0 to the USB NIC ----------
+  say "Restoring vmbr0 bridge-port to $new_usb_if"
+  awk -v usb="$new_usb_if" '
+    BEGIN{inbr=0}
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
+    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " usb}
+    {print}
+  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+  
+  VMAC="$(cat /sys/class/net/"$new_usb_if"/address)"
+  # Only add hwaddress if not already present in vmbr0 block
+  # Check for hwaddress in vmbr0 stanza only (between vmbr0 start and next blank line or next iface)
+  if ! awk '
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ { in_vmbr=1; next }
+    in_vmbr && /^[[:space:]]*hwaddress[[:space:]]+ether/ { found=1; exit 0 }
+    in_vmbr && (/^[[:space:]]*$/ || /^iface[[:space:]]+/ || /^auto[[:space:]]+/) { exit 1 }
+    END { exit (found ? 0 : 1) }
+  ' "$IFCFG"; then
+    sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${VMAC}" "$IFCFG"
+  fi
+  
+  ifreload -a || true
+  sleep 2
+  ip link set "$new_usb_if" up || true
+  ifreload -a || true
+  sleep 1
 fi
-
-say "USB NIC bound to r8152 on interface: $new_usb_if"
-ethtool -i "$new_usb_if" | sed 's/^/    /'
-
-# ---------- Restore vmbr0 to the USB NIC ----------
-say "Restoring vmbr0 bridge-port to $new_usb_if"
-awk -v usb="$new_usb_if" '
-  BEGIN{inbr=0}
-  /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
-  inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " usb}
-  {print}
-' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
-
-VMAC="$(cat /sys/class/net/"$new_usb_if"/address)"
-# Only add hwaddress if not already present in vmbr0 block
-if ! awk '/^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/,/^iface[[:space:]]+/ {if (/hwaddress ether/) exit 0} END {exit 1}' "$IFCFG"; then
-  sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${VMAC}" "$IFCFG"
-fi
-
-ifreload -a || true
-sleep 2
-ip link set "$new_usb_if" up || true
-ifreload -a || true
-sleep 1
 
 # ---------- Summary report ----------
 say "Summary"
