@@ -249,14 +249,18 @@ lsusb -t | sed 's/^/    /'
 sleep 1
 
 # Use the same detection function for consistency (verifies both VID/PID and driver)
-new_usb_if="$(detect_usb_if || true)"
-
-if [[ -z "${new_usb_if:-}" ]]; then
-  note "No interface shows driver=r8152 yet; trying once more after 2s..."
-  sleep 2
-  lsusb -t | sed 's/^/    /'
+# Retry up to 5 times with increasing delays to allow for binding and interface creation
+new_usb_if=""
+for attempt in 1 2 3 4 5; do
   new_usb_if="$(detect_usb_if || true)"
-fi
+  [[ -n "${new_usb_if:-}" ]] && break
+  
+  if [[ $attempt -lt 5 ]]; then
+    note "No interface shows driver=r8152 yet; retry $attempt/4 after ${attempt}s..."
+    sleep "$attempt"
+    lsusb -t | sed 's/^/    /'
+  fi
+done
 
 [[ -n "${new_usb_if:-}" ]] || die "USB NIC did not bind to r8152. Check cabling/port and rerun."
 
