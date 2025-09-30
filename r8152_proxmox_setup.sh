@@ -7,11 +7,12 @@
 # - Uses awesometic .deb from /root/ or auto-fetches the latest from GitHub
 # - Preserves access by temporarily moving vmbr0 to onboard NIC (enp3s0) if needed
 # - Enrolls DKMS MOK for Secure Boot if not yet enrolled
-# - Blacklists cdc_* drivers so r8152 binds
-# - Guides you to unplug/replug once to trigger binding
+# - Blacklists cdc_* drivers so r8152 binds automatically
+# - Embeds r8152 in initramfs for early boot availability
+# - Ensures USB device is in correct configuration mode (config 1)
+# - Removes conflicting manual udev rules that can cause boot failures
+# - Guides you to unplug/replug once if initial binding needed
 # - Restores vmbr0 to the USB NIC and prints a concise report
-# - Installs udev rule for deterministic r8152 binding at boot
-# - Embeds r8152 in initramfs to prevent boot-time driver races
 #
 # Requirements: PVE 9 with ifupdown2, onboard NIC cabled as backup (default: enp3s0)
 # awesometic (https://github.com/awesometic/realtek-r8152-dkms) .deb at /root/realtek-r8152-dkms_2.20.1-1_amd64.deb
@@ -206,30 +207,54 @@ else
   note "Secure Boot disabled or unsupported by mokutil."
 fi
 
-# ---------- Install udev rule for deterministic binding ----------
-say "Installing udev rule for deterministic r8152 binding at boot"
-UDEV_RULE="/etc/udev/rules.d/99-r8152-rtl8157-bind.rules"
-if [[ ! -f "$UDEV_RULE" ]]; then
-  # Force r8152 driver binding when the RTL8157 USB interface is added
-  # Sets driver_override, loads r8152 module, and explicitly binds the device
-  # Targets the network interface function (bInterfaceNumber 00) of the 0bda:8157 device
-  tee "$UDEV_RULE" >/dev/null <<'RULE'
-# Force r8152 driver binding for Realtek RTL8157 (0bda:8157) at device enumeration
-# Eliminates boot-time races where generic USB Ethernet drivers might bind first
-# Sets driver_override, ensures r8152 is loaded, and binds the device immediately
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="8157", ATTR{bInterfaceNumber}=="00", \
-  RUN+="/bin/sh -c 'echo r8152 > /sys$devpath/driver_override; /sbin/modprobe r8152; if [ -e /sys$devpath/driver/bind ]; then echo $devpath > /sys/bus/usb/drivers/r8152/bind; fi'"
-RULE
-  note "Created $UDEV_RULE"
-  udevadm control --reload
-else
-  note "udev rule already exists: $UDEV_RULE"
-fi
+# ---------- Clean up conflicting/unnecessary udev rules ----------
+say "Removing conflicting and unnecessary udev rules"
+# Manual rules that try to unbind/rebind the device can cause boot failures
+# With awesometic's config-setting rule, blacklist, and initramfs, auto-binding works perfectly
+CONFLICTING_RULES=(
+  "/etc/udev/rules.d/90-r8157-force-r8152.rules"
+  "/etc/udev/rules.d/99-r8152-rtl8157-bind.rules"
+)
+for rule in "${CONFLICTING_RULES[@]}"; do
+  if [[ -f "$rule" ]]; then
+    note "Removing: $rule"
+    rm -f "$rule"
+  fi
+done
+udevadm control --reload
+
+# ---------- Fix USB configuration and establish binding ----------
+fix_usb_configuration() {
+  # Realtek USB adapters support multiple USB configurations (modes)
+  # Configuration 1: r8152 proprietary mode (best performance, 5G support)
+  # Configuration 2/3: CDC NCM/ECM mode (generic, lower performance)
+  # The awesometic udev rules set this, but we need to ensure it's correct
+  
+  local usb_dev
+  for usb_dev in /sys/bus/usb/devices/*; do
+    [[ -r "$usb_dev/idVendor" ]] || continue
+    local vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
+    local pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
+    
+    if [[ "$vid:$pid" == "0bda:8157" ]]; then
+      local current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
+      if [[ "$current_config" != "1" ]]; then
+        note "Setting USB configuration to 1 for r8152 mode (was: $current_config)"
+        echo 1 > "$usb_dev/bConfigurationValue" || true
+        sleep 2  # Allow device to re-enumerate
+      fi
+      return 0
+    fi
+  done
+  return 1
+}
 
 # ---------- Verify or establish r8152 binding ----------
 say "Ensuring r8152 driver is loaded and device is bound"
 modprobe r8152
+
+# Fix USB configuration if needed
+fix_usb_configuration || note "USB device not found or config already correct"
 
 # Check if device is already properly bound to r8152
 new_usb_if="$(detect_usb_if || true)"
@@ -348,8 +373,17 @@ say "Summary"
   echo "DKMS:"
   dkms status | grep -E 'r8152|realtek-r8152' || true
   echo
-  echo "udev rule (persistent binding):"
-  ls -l /etc/udev/rules.d/99-r8152-rtl8157-bind.rules 2>/dev/null || echo "  (not found)"
+  echo "USB configuration mode:"
+  for usb_dev in /sys/bus/usb/devices/*; do
+    [[ -r "$usb_dev/idVendor" ]] || continue
+    vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
+    pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
+    if [[ "$vid:$pid" == "0bda:8157" ]]; then
+      config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "unknown")
+      echo "  RTL8157 config: $config (should be 1 for r8152 mode)"
+      break
+    fi
+  done
   echo
   echo "Initramfs modules (r8152 embedded):"
   grep -E '^\s*r8152(\s|$)' /etc/initramfs-tools/modules 2>/dev/null || echo "  (not embedded)"
