@@ -207,17 +207,17 @@ else
   note "Secure Boot disabled or unsupported by mokutil."
 fi
 
-# ---------- Clean up conflicting/unnecessary udev rules ----------
-say "Removing conflicting and unnecessary udev rules"
-# Manual rules that try to unbind/rebind the device can cause boot failures
-# With awesometic's config-setting rule, blacklist, and initramfs, auto-binding works perfectly
-CONFLICTING_RULES=(
-  "/etc/udev/rules.d/90-r8157-force-r8152.rules"
+# ---------- Clean up udev rules created by old versions of this script ----------
+say "Removing udev rules from previous script versions"
+# Old versions of this script created manual binding rules that are unnecessary
+# and can fail at boot. With awesometic's config-setting rule, blacklist, and
+# initramfs, the kernel auto-binds r8152 without manual intervention.
+OLD_SCRIPT_RULES=(
   "/etc/udev/rules.d/99-r8152-rtl8157-bind.rules"
 )
-for rule in "${CONFLICTING_RULES[@]}"; do
+for rule in "${OLD_SCRIPT_RULES[@]}"; do
   if [[ -f "$rule" ]]; then
-    note "Removing: $rule"
+    note "Removing old script rule: $rule"
     rm -f "$rule"
   fi
 done
