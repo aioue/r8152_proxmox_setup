@@ -356,7 +356,7 @@ say "Summary"
   echo
   echo "Initramfs blacklist verification:"
   if command -v lsinitramfs >/dev/null 2>&1; then
-    if lsinitramfs "/boot/initrd.img-$KREL" 2>/dev/null | grep -q 'modprobe.d/99-rtl815x-usb-blacklist.conf'; then
+    if lsinitramfs "/boot/initrd.img-$KREL" 2>/dev/null | grep 'modprobe.d/99-rtl815x-usb-blacklist.conf' >/dev/null; then
       echo "  ✓ Blacklist file present in initramfs"
     else
       echo "  ✗ Blacklist file NOT found in initramfs"
