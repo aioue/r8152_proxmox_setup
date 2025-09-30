@@ -188,10 +188,18 @@ say "Checking Secure Boot/MOK status"
 if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
   if ! mokutil --list-enrolled 2>/dev/null | grep -qi 'DKMS module signing key'; then
     note "Secure Boot is enabled and DKMS MOK not enrolled."
-    say "Enrolling DKMS signing key now. You will be prompted to set a password; a reboot is required."
-    mokutil --import /var/lib/dkms/mok.pub
-    say "Reboot required to complete MOK enrollment. After reboot, re-run this script with the same parameters."
-    exit 0
+    say "Enrolling DKMS signing key now. You will be prompted to set a password."
+    # Try to import; check if it actually needs enrollment
+    MOK_OUTPUT="$(mokutil --import /var/lib/dkms/mok.pub 2>&1)"
+    if echo "$MOK_OUTPUT" | grep -qi 'already enrolled'; then
+      note "MOK key already enrolled (detection issue resolved)."
+    elif echo "$MOK_OUTPUT" | grep -qi 'password'; then
+      # Actual enrollment happened, reboot needed
+      say "Reboot required to complete MOK enrollment. After reboot, re-run this script with the same parameters."
+      exit 0
+    else
+      note "MOK import status: $MOK_OUTPUT"
+    fi
   else
     note "Secure Boot enabled; DKMS MOK is enrolled."
   fi
