@@ -269,7 +269,15 @@ else
     fi
   done
   
-  [[ -n "${new_usb_if:-}" ]] || die "USB NIC did not bind to r8152. Check cabling/port and rerun."
+  if [[ -z "${new_usb_if:-}" ]]; then
+    echo "ERROR: USB NIC did not bind to r8152 after replug." >&2
+    echo "Possible causes:" >&2
+    echo "  - Device not properly connected" >&2
+    echo "  - Wrong USB port" >&2
+    echo "  - Switch STP blocking port (bridge MAC appears on multiple ports)" >&2
+    echo "  - Try waiting 30 seconds for STP convergence, then rerun" >&2
+    exit 1
+  fi
 fi
 
 say "USB NIC bound to r8152 on interface: $new_usb_if"
