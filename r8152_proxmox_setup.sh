@@ -88,11 +88,13 @@ detect_usb_if() {
     DEVLINK="$(readlink -f "$n"/device || true)"
     [[ "$DEVLINK" == *"/usb"* ]] || continue
     
-    # USB device attributes (idVendor/idProduct) are in the parent directory if DEVLINK points to an interface
+    # USB device attributes (idVendor/idProduct) may be in parent directories
+    # Walk up the tree (bounded to 3 levels) to find them
     USB_DEV="$DEVLINK"
-    if [[ ! -r "$USB_DEV/idVendor" ]]; then
-      USB_DEV="$(dirname "$DEVLINK")"
-    fi
+    for _ in 1 2 3; do
+      [[ -r "$USB_DEV/idVendor" ]] && break
+      USB_DEV="$(dirname "$USB_DEV")"
+    done
     
     if [[ -r "$USB_DEV/idVendor" && -r "$USB_DEV/idProduct" ]]; then
       v=$(cat "$USB_DEV/idVendor"); p=$(cat "$USB_DEV/idProduct")
@@ -164,7 +166,11 @@ apt-get install -y dkms build-essential "proxmox-headers-$KREL"
 apt-get install -y "$DEB_PATH"
 
 say "Verifying DKMS installation"
-dkms status | grep -E 'r8152|realtek-r8152' || die "DKMS did not register r8152"
+if ! dkms status | grep -E 'r8152|realtek-r8152' >/dev/null; then
+  note "DKMS did not register r8152. Checking in-kernel module version:"
+  modinfo r8152 2>/dev/null | sed -n '1,8p' | sed 's/^/    /' || true
+  die "DKMS installation failed. See in-kernel module info above."
+fi
 modinfo r8152 | sed -n '1,8p' | sed 's/^/    /' || true
 
 # ---------- Blacklist competing USB net drivers and refresh initramfs ----------
@@ -195,17 +201,23 @@ say "Checking Secure Boot/MOK status"
 if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
   if ! mokutil --list-enrolled 2>/dev/null | grep -qi 'DKMS module signing key'; then
     note "Secure Boot is enabled and DKMS MOK not enrolled."
-    say "Enrolling DKMS signing key now. You will be prompted to set a password."
-    # Try to import; check if it actually needs enrollment
-    MOK_OUTPUT="$(mokutil --import /var/lib/dkms/mok.pub 2>&1)"
-    if echo "$MOK_OUTPUT" | grep -qi 'already enrolled'; then
-      note "MOK key already enrolled (detection issue resolved)."
-    elif echo "$MOK_OUTPUT" | grep -qi 'password'; then
-      # Actual enrollment happened, reboot needed
-      say "Reboot required to complete MOK enrollment. After reboot, re-run this script with the same parameters."
-      exit 0
+    MOK_KEY="/var/lib/dkms/mok.pub"
+    if [[ -f "$MOK_KEY" ]]; then
+      say "Enrolling DKMS signing key now. You will be prompted to set a password."
+      # Try to import; check if it actually needs enrollment
+      MOK_OUTPUT="$(mokutil --import "$MOK_KEY" 2>&1)"
+      if echo "$MOK_OUTPUT" | grep -qi 'already enrolled'; then
+        note "MOK key already enrolled (detection issue resolved)."
+      elif echo "$MOK_OUTPUT" | grep -qi 'password'; then
+        # Actual enrollment happened, reboot needed
+        say "Reboot required to complete MOK enrollment. After reboot, re-run this script with the same parameters."
+        exit 0
+      else
+        note "MOK import status: $MOK_OUTPUT"
+      fi
     else
-      note "MOK import status: $MOK_OUTPUT"
+      note "DKMS signing key not found at $MOK_KEY"
+      note "Consult DKMS package documentation to locate and enroll the signing key if needed."
     fi
   else
     note "Secure Boot enabled; DKMS MOK is enrolled."
