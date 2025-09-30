@@ -87,8 +87,15 @@ detect_usb_if() {
     [[ -e "$n/device" ]] || continue
     DEVLINK="$(readlink -f "$n"/device || true)"
     [[ "$DEVLINK" == *"/usb"* ]] || continue
-    if [[ -r "$DEVLINK/idVendor" && -r "$DEVLINK/idProduct" ]]; then
-      v=$(cat "$DEVLINK/idVendor"); p=$(cat "$DEVLINK/idProduct")
+    
+    # USB device attributes (idVendor/idProduct) are in the parent directory if DEVLINK points to an interface
+    USB_DEV="$DEVLINK"
+    if [[ ! -r "$USB_DEV/idVendor" ]]; then
+      USB_DEV="$(dirname "$DEVLINK")"
+    fi
+    
+    if [[ -r "$USB_DEV/idVendor" && -r "$USB_DEV/idProduct" ]]; then
+      v=$(cat "$USB_DEV/idVendor"); p=$(cat "$USB_DEV/idProduct")
       if [[ "$v:$p" == "$USB_VENDOR:$USB_PRODUCT" ]]; then
         # Verify it's actually bound to r8152
         if [[ -e "$n/device/driver/module" ]]; then
