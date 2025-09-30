@@ -38,6 +38,42 @@ say() { printf "\n==> %s\n" "$*"; }
 note() { printf "    - %s\n" "$*"; }
 die() { printf "ERROR: %s\n" "$*" >&2; exit 1; }
 
+# ---------- Helper functions ----------
+# Find the sysfs path for the Realtek USB device (0bda:8157)
+find_realtek_usb_device() {
+  local usb_dev vid pid
+  for usb_dev in /sys/bus/usb/devices/*; do
+    [[ -r "$usb_dev/idVendor" ]] || continue
+    vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
+    pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
+    [[ "$vid:$pid" == "$USB_VENDOR:$USB_PRODUCT" ]] && { echo "$usb_dev"; return 0; }
+  done
+  return 1
+}
+
+# Get current bridge-port for vmbr0 from /etc/network/interfaces
+get_vmbr0_port() {
+  awk '
+    BEGIN{inbr=0;port=""}
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1; next}
+    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {
+       for (i=2;i<=NF;i++) if ($i!="bridge-ports") {port=$i; break}
+       print port; exit
+    }
+  ' "$IFCFG"
+}
+
+# Set bridge-port for vmbr0 in /etc/network/interfaces
+set_vmbr0_port() {
+  local port="$1"
+  awk -v p="$port" '
+    BEGIN{inbr=0}
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
+    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " p}
+    {print}
+  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+}
+
 # ---------- fetch latest .deb from GitHub ----------
 fetch_latest_deb_if_needed() {
   if [[ -f "$DEB_PATH" ]]; then
@@ -79,6 +115,7 @@ fetch_latest_deb_if_needed
 
 USB_VENDOR="0bda"
 USB_PRODUCT="8157"
+IFCFG="/etc/network/interfaces"
 
 detect_usb_if() {
   # Find interface bound to r8152 whose USB device matches 0bda:8157
@@ -115,15 +152,43 @@ detect_usb_if() {
 say "Verifying onboard interface $ONBOARD_IF is available for failover"
 [[ -e "/sys/class/net/$ONBOARD_IF" ]] || die "Onboard interface $ONBOARD_IF not found; adjust script variable."
 
-# Check link state - failover path must be viable if we need it
-if [[ -r "/sys/class/net/$ONBOARD_IF/carrier" ]]; then
-  CARRIER="$(cat /sys/class/net/$ONBOARD_IF/carrier 2>/dev/null || echo 0)"
-  if [[ "$CARRIER" != "1" ]]; then
-    die "Onboard interface $ONBOARD_IF has no link (cable unplugged?). Cannot safely switch bridge if needed. Connect $ONBOARD_IF and rerun."
-  fi
-  note "Onboard interface $ONBOARD_IF has link - failover path available"
+# Check if onboard interface is configured as 'inet manual' (safe to bring up temporarily)
+ONBOARD_CONFIG="$(grep -A 1 "^iface ${ONBOARD_IF}" "$IFCFG" 2>/dev/null | grep 'inet' | awk '{print $3}')"
+if [[ "$ONBOARD_CONFIG" != "manual" ]]; then
+  note "Warning: $ONBOARD_IF is configured as 'inet $ONBOARD_CONFIG' (not manual)"
+  note "Skipping automatic link verification to avoid network conflicts"
+  note "Ensure $ONBOARD_IF has link (cable plugged in) before running this script"
 else
-  note "Warning: Cannot verify link state of $ONBOARD_IF (interface may be down)"
+  # Bring interface up temporarily to check carrier (link state)
+  # Safe because the interface is 'inet manual' (no IP assigned)
+  ONBOARD_WAS_UP=false
+  if ip link show "$ONBOARD_IF" | grep -q 'state UP'; then
+    ONBOARD_WAS_UP=true
+  fi
+
+  if ! $ONBOARD_WAS_UP; then
+    note "Bringing up $ONBOARD_IF temporarily to verify link"
+    ip link set "$ONBOARD_IF" up
+    sleep 1  # Allow link negotiation
+  fi
+
+  # Check link state - failover path must be viable if we need it
+  if [[ -r "/sys/class/net/$ONBOARD_IF/carrier" ]]; then
+    CARRIER="$(cat /sys/class/net/$ONBOARD_IF/carrier 2>/dev/null || echo 0)"
+    if [[ "$CARRIER" != "1" ]]; then
+      die "Onboard interface $ONBOARD_IF has no link (cable unplugged?). Cannot safely switch bridge if needed. Connect $ONBOARD_IF and rerun."
+    fi
+    note "Onboard interface $ONBOARD_IF has link - failover path available"
+    
+    # Keep it up since we verified link - we may need it for bridge failover
+    note "Keeping $ONBOARD_IF up for potential failover use"
+  else
+    note "Warning: Cannot verify link state of $ONBOARD_IF"
+    # Put it back down if we brought it up and couldn't verify
+    if ! $ONBOARD_WAS_UP; then
+      ip link set "$ONBOARD_IF" down
+    fi
+  fi
 fi
 
 current_usb_if="$(detect_usb_if || true)"
@@ -136,7 +201,6 @@ else
   note "USB Realtek interface not currently bound (will probe after install)."
 fi
 
-IFCFG="/etc/network/interfaces"
 cp -a "$IFCFG" "${IFCFG}.r8152.backup.$(date +%Y%m%d_%H%M%S)"
 
 # ---------- Install headers, DKMS package ----------
@@ -230,23 +294,16 @@ fix_usb_configuration() {
   # Configuration 2/3: CDC NCM/ECM mode (generic, lower performance)
   # The awesometic udev rules set this, but we need to ensure it's correct
   
-  local usb_dev vid pid current_config
-  for usb_dev in /sys/bus/usb/devices/*; do
-    [[ -r "$usb_dev/idVendor" ]] || continue
-    vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
-    pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
-    
-    if [[ "$vid:$pid" == "0bda:8157" ]]; then
-      current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
-      if [[ "$current_config" != "1" ]]; then
-        note "Setting USB configuration to 1 for r8152 mode (was: $current_config)"
-        echo 1 > "$usb_dev/bConfigurationValue" || true
-        sleep 2  # Allow device to re-enumerate
-      fi
-      return 0
-    fi
-  done
-  return 1
+  local usb_dev current_config
+  usb_dev="$(find_realtek_usb_device)" || return 1
+  
+  current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
+  if [[ "$current_config" != "1" ]]; then
+    note "Setting USB configuration to 1 for r8152 mode (was: $current_config)"
+    echo 1 > "$usb_dev/bConfigurationValue" || true
+    sleep 2  # Allow device to re-enumerate
+  fi
+  return 0
 }
 
 # ---------- Verify or establish r8152 binding ----------
@@ -270,25 +327,13 @@ else
   say "USB NIC not currently bound to r8152 - initial setup required"
   
   # Get current bridge port and switch to onboard if needed
-  vmbr_port="$(awk '
-    BEGIN{inbr=0;port=""}
-    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1; next}
-    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {
-       for (i=2;i<=NF;i++) if ($i!="bridge-ports") {port=$i; break}
-       print port; exit
-    }
-  ' "$IFCFG")"
+  vmbr_port="$(get_vmbr0_port)"
   
   note "vmbr0 current bridge-port: ${vmbr_port:-<none>}"
   
   if [[ -n "${vmbr_port:-}" && "$vmbr_port" != "$ONBOARD_IF" ]]; then
     say "Temporarily switching vmbr0 bridge-port to $ONBOARD_IF for safety during replug"
-    awk -v onb="$ONBOARD_IF" '
-      BEGIN{inbr=0}
-      /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
-      inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " onb}
-      {print}
-    ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+    set_vmbr0_port "$ONBOARD_IF"
     ifreload -a || true
     sleep 2
     ip -br link | sed 's/^/    /'
@@ -337,12 +382,7 @@ else
   
   # ---------- Restore vmbr0 to the USB NIC ----------
   say "Restoring vmbr0 bridge-port to $new_usb_if"
-  awk -v usb="$new_usb_if" '
-    BEGIN{inbr=0}
-    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
-    inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " usb}
-    {print}
-  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+  set_vmbr0_port "$new_usb_if"
   
   VMAC="$(cat /sys/class/net/"$new_usb_if"/address)"
   # Only add hwaddress if not already present in vmbr0 block
@@ -374,16 +414,12 @@ say "Summary"
   dkms status | grep -E 'r8152|realtek-r8152' || true
   echo
   echo "USB configuration mode:"
-  for usb_dev in /sys/bus/usb/devices/*; do
-    [[ -r "$usb_dev/idVendor" ]] || continue
-    vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
-    pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
-    if [[ "$vid:$pid" == "0bda:8157" ]]; then
-      config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "unknown")
-      echo "  RTL8157 config: $config (should be 1 for r8152 mode)"
-      break
-    fi
-  done
+  if usb_dev="$(find_realtek_usb_device)"; then
+    config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "unknown")
+    echo "  RTL8157 config: $config (should be 1 for r8152 mode)"
+  else
+    echo "  RTL8157 device not found"
+  fi
   echo
   echo "Initramfs modules (r8152 embedded):"
   grep -E '^\s*r8152(\s|$)' /etc/initramfs-tools/modules 2>/dev/null || echo "  (not embedded)"
