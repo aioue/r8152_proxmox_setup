@@ -230,14 +230,14 @@ fix_usb_configuration() {
   # Configuration 2/3: CDC NCM/ECM mode (generic, lower performance)
   # The awesometic udev rules set this, but we need to ensure it's correct
   
-  local usb_dev
+  local usb_dev vid pid current_config
   for usb_dev in /sys/bus/usb/devices/*; do
     [[ -r "$usb_dev/idVendor" ]] || continue
-    local vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
-    local pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
+    vid=$(cat "$usb_dev/idVendor" 2>/dev/null)
+    pid=$(cat "$usb_dev/idProduct" 2>/dev/null)
     
     if [[ "$vid:$pid" == "0bda:8157" ]]; then
-      local current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
+      current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
       if [[ "$current_config" != "1" ]]; then
         note "Setting USB configuration to 1 for r8152 mode (was: $current_config)"
         echo 1 > "$usb_dev/bConfigurationValue" || true
