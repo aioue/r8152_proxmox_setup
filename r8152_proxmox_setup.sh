@@ -235,34 +235,42 @@ else
   note "udev rule already exists: $UDEV_RULE"
 fi
 
-# ---------- Load r8152 and guide replug ----------
-say "Loading r8152 and preparing for device rebind"
-modprobe -r r8152 2>/dev/null || true
+# ---------- Verify or establish r8152 binding ----------
+say "Ensuring r8152 driver is loaded and device is bound"
 modprobe r8152
 
-say "ACTION REQUIRED: Unplug and replug the Realtek USB 5G NIC now, then press Enter."
-read -r -p "Press Enter after replug..."
+# Check if device is already properly bound to r8152
+new_usb_if="$(detect_usb_if || true)"
 
-# ---------- Detect USB NIC and verify binding ----------
-say "Detecting the USB NIC and verifying binding"
-lsusb -t | sed 's/^/    /'
-sleep 1
-
-# Use the same detection function for consistency (verifies both VID/PID and driver)
-# Retry up to 5 times with increasing delays to allow for binding and interface creation
-new_usb_if=""
-for attempt in 1 2 3 4 5; do
-  new_usb_if="$(detect_usb_if || true)"
-  [[ -n "${new_usb_if:-}" ]] && break
+if [[ -n "${new_usb_if:-}" ]]; then
+  # Device already bound and working - skip replug
+  note "USB NIC already bound to r8152: $new_usb_if"
+  note "Skipping replug step (device is already working)"
+else
+  # Device not bound to r8152 - need replug for initial setup
+  say "USB NIC not currently bound to r8152"
+  say "ACTION REQUIRED: Unplug and replug the Realtek USB 5G NIC now, then press Enter."
+  read -r -p "Press Enter after replug..."
   
-  if [[ $attempt -lt 5 ]]; then
-    note "No interface shows driver=r8152 yet; retry $attempt/4 after ${attempt}s..."
-    sleep "$attempt"
-    lsusb -t | sed 's/^/    /'
-  fi
-done
-
-[[ -n "${new_usb_if:-}" ]] || die "USB NIC did not bind to r8152. Check cabling/port and rerun."
+  # Detect USB NIC after replug with retry logic
+  say "Detecting the USB NIC and verifying binding"
+  lsusb -t | sed 's/^/    /'
+  sleep 1
+  
+  # Retry up to 5 times with increasing delays to allow for binding and interface creation
+  for attempt in 1 2 3 4 5; do
+    new_usb_if="$(detect_usb_if || true)"
+    [[ -n "${new_usb_if:-}" ]] && break
+    
+    if [[ $attempt -lt 5 ]]; then
+      note "No interface shows driver=r8152 yet; retry $attempt/4 after ${attempt}s..."
+      sleep "$attempt"
+      lsusb -t | sed 's/^/    /'
+    fi
+  done
+  
+  [[ -n "${new_usb_if:-}" ]] || die "USB NIC did not bind to r8152. Check cabling/port and rerun."
+fi
 
 say "USB NIC bound to r8152 on interface: $new_usb_if"
 ethtool -i "$new_usb_if" | sed 's/^/    /'
