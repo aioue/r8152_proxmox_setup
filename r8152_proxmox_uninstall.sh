@@ -157,8 +157,18 @@ remove_kernel_customizations() {
   else
     note "r8152 not listed in initramfs modules"
   fi
+  # Rebuild initramfs for ALL installed kernels, not just the current one.
+  # Rationale: On reboot the system may select a different kernel; ensuring
+  # every initramfs contains consistent ZFS/net state avoids boot stalls like
+  # dropped ZFS imports (you saw needing `zpool import rpool` in initramfs).
+  update-initramfs -u -k all
 
-  update-initramfs -u
+  # Refresh bootloader entries/ESPs for Proxmox-managed systems so the new
+  # initramfs images are propagated. Safe no-op if tool is missing.
+  if command -v proxmox-boot-tool >/dev/null 2>&1; then
+    note "Refreshing Proxmox boot entries (proxmox-boot-tool)"
+    proxmox-boot-tool refresh || true
+  fi
 }
 
 wait_for_connectivity_gate() {
@@ -334,8 +344,12 @@ main() {
   switch_vmbr0_to_onboard_if_needed
   wait_for_connectivity_gate
   remove_vmbr0_hwaddress_if_usb_mac
-  remove_kernel_customizations
+  # Uninstall DKMS package first so the final initramfs we build below reflects
+  # the post-uninstall state across ALL kernels.
   uninstall_dkms_package
+  # Revert blacklist and initramfs module entries, then rebuild all initramfs
+  # and refresh Proxmox boot entries to propagate the changes to ESPs.
+  remove_kernel_customizations
   if $switch_back; then
     switch_back_to_usb_with_checks
   fi

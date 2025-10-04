@@ -46,3 +46,39 @@ This document captures practical behavior observed on Proxmox VE 9 hosts and the
 - Keep a recent backup of `/etc/network/interfaces` for manual restore if needed.
 
 
+### Findings (Oct 2025) and changes applied
+- Install outage root cause: udev reload and driver rebinding flapped the USB NIC while `vmbr0` still used it, dropping management. Fix: pre-switch `vmbr0` to onboard before DKMS/udev/initramfs steps, then restore after verifying `r8152` binding. This prevents an outage instead of recovering after one.
+- Parsing quirk: onboard method read as `inet inet`. Fix: parse field 4 of `iface <if> inet <method>` to get the actual method (e.g., `manual|dhcp|static`).
+- Uninstall boot stall: only the current kernel’s initramfs was rebuilt; a different kernel could boot with stale initramfs leading to an initramfs shell and manual `zpool import rpool`. Fix: rebuild initramfs for all kernels and refresh Proxmox boot entries.
+
+- DKMS touching initramfs: after any DKMS install/uninstall that affects initramfs, rebuild for all kernels (`update-initramfs -u -k all`) and refresh Proxmox boot entries (`proxmox-boot-tool refresh` if available) so all ESPs and boot entries contain the final state.
+- Interface rename and netlink errors: udev briefly created `eth0` then renamed to `enx...`; summary code referenced the stale name causing “no device matches name” netlink errors. Fix: insert `udevadm settle` after udev reload and re-detect the USB iface immediately before the summary; guard when absent.
+- Switching `vmbr0` to USB: only perform the switch when carrier is present on the USB NIC; with link up, `ethtool` reports `Speed=5000Mb/s` on `enx34c8d6b10272` and the bridge remains UP.
+- ifreload warning observed: `error: vmbr0: invalid literal for int() with base 16: 'vmbr0'` appeared during ad‑hoc bridge edits. Networking stayed healthy. Prefer the script’s `set_vmbr0_port` path to avoid spurious parser warnings.
+
+#### Implemented hardening
+- Setup script:
+  - Early, commented pre-switch of `vmbr0` to onboard (carrier-guarded), restore to USB NIC after `r8152` verified; optional `hwaddress` pinning preserved.
+  - Corrected onboard method parsing to avoid false warnings and unsafe bring-ups.
+  - Rebuild initramfs for all kernels (`-k all`) and refresh Proxmox boot entries if `proxmox-boot-tool` exists.
+  - Added `udevadm settle` after udev reload and during detection retries; re-detect USB iface before summary and guard when missing to prevent stale-name netlink errors.
+- Uninstall script:
+  - Remove blacklist and `r8152` initramfs module entry.
+  - Uninstall DKMS package first, then revert blacklist/initramfs module entries.
+  - Rebuild all initramfs (`update-initramfs -u -k all`) and refresh boot entries (`proxmox-boot-tool refresh`) to ensure all kernels/ESPs get the final state.
+
+#### Useful diagnostics
+```bash
+# Current and previous boot for ZFS/import/initramfs lines
+journalctl -b --no-pager | grep -Ei 'zfs|zpool|rpool|initramfs|proxmox-boot' | tail -n 200
+journalctl -b -1 --no-pager | grep -Ei 'zfs|zpool|rpool|initramfs|proxmox-boot' | tail -n 200
+
+# Inspect initramfs contents for ZFS artifacts and absence of our blacklist
+for i in /boot/initrd.img-*; do echo "==> $i"; lsinitramfs "$i" | grep -E 'zfs|zpool.cache|99-rtl815x-usb-blacklist.conf' | head; done
+
+# Rebuild all initramfs and refresh boot entries
+update-initramfs -u -k all
+command -v proxmox-boot-tool >/dev/null && proxmox-boot-tool refresh
+```
+
+

@@ -155,10 +155,12 @@ say "Verifying onboard interface $ONBOARD_IF is available for failover"
 [[ -e "/sys/class/net/$ONBOARD_IF" ]] || die "Onboard interface $ONBOARD_IF not found; adjust script variable."
 
 # Check if onboard interface is configured as 'inet manual' (safe to bring up temporarily)
-ONBOARD_CONFIG="$(grep -A 1 "^iface ${ONBOARD_IF}" "$IFCFG" 2>/dev/null | grep 'inet' | awk '{print $3}')"
+# Field parsing fix: in ifupdown syntax, the method is field 4 on the 'iface <if> inet <method>' line.
+# Older logic printed 'inet inet' due to reading field 3; use field 4 here to get the actual method.
+ONBOARD_CONFIG="$(awk -v ifc="$ONBOARD_IF" '$1=="iface" && $2==ifc && $3=="inet" {print $4; exit}' "$IFCFG" 2>/dev/null || true)"
 if [[ "$ONBOARD_CONFIG" != "manual" ]]; then
-  note "Warning: $ONBOARD_IF is configured as 'inet $ONBOARD_CONFIG' (not manual)"
-  note "Skipping automatic link verification to avoid network conflicts"
+  note "Warning: $ONBOARD_IF IPv4 method is '${ONBOARD_CONFIG:-unknown}' (not manual)"
+  note "Will not bring it up automatically to avoid IP conflicts"
   note "Ensure $ONBOARD_IF has link (cable plugged in) before running this script"
 else
   # Bring interface up temporarily to check carrier (link state)
@@ -205,6 +207,28 @@ fi
 
 cp -a "$IFCFG" "${IFCFG}.r8152.backup.$(date +%Y%m%d_%H%M%S)"
 
+# ---------- Preventive failover: keep vmbr0 up during DKMS/udev/initramfs flaps ----------
+# To avoid a management outage while USB NIC re-enumerates and drivers rebalance,
+# temporarily move vmbr0 to the onboard NIC before making changes that can flap links.
+# We do not alter the onboard interface IP configuration; we only change bridge membership.
+PRE_SWITCH_DONE=false
+PRE_VM_BR_PORT="$(get_vmbr0_port)"
+say "Ensuring vmbr0 continuity during driver install"
+if [[ -n "${PRE_VM_BR_PORT:-}" && "$PRE_VM_BR_PORT" != "$ONBOARD_IF" ]]; then
+  # Verify onboard carrier without changing its IP state to avoid conflicts
+  if [[ -r "/sys/class/net/$ONBOARD_IF/carrier" ]] && [[ "$(cat "/sys/class/net/$ONBOARD_IF/carrier" 2>/dev/null || echo 0)" == 1 ]]; then
+    say "Temporarily switching vmbr0 bridge-port to $ONBOARD_IF before DKMS/udev steps"
+    set_vmbr0_port "$ONBOARD_IF"
+    ifreload -a || true
+    sleep 2
+    PRE_SWITCH_DONE=true
+  else
+    note "Skipping pre-switch: $ONBOARD_IF has no link or carrier cannot be verified"
+  fi
+else
+  note "vmbr0 already on $ONBOARD_IF (or no change needed)."
+fi
+
 # ---------- Install headers, DKMS package ----------
 say "Installing headers, DKMS, and the r8152 DKMS package"
 export DEBIAN_FRONTEND=noninteractive
@@ -241,7 +265,17 @@ if ! grep -qE '^\s*r8152(\s|$)' "$IMOD" 2>/dev/null; then
   echo "r8152" >> "$IMOD"
 fi
 
-update-initramfs -u
+# Rebuild initramfs for ALL installed kernels to ensure consistent early-boot state
+# across kernel selections. This guarantees that blacklist and module embedding
+# are applied no matter which kernel is chosen at reboot.
+update-initramfs -u -k all
+
+# Refresh Proxmox boot entries/ESPs so regenerated initramfs images are copied
+# to all managed EFI System Partitions. Safe no-op if tool is absent.
+if command -v proxmox-boot-tool >/dev/null 2>&1; then
+  note "Refreshing Proxmox boot entries (proxmox-boot-tool)"
+  proxmox-boot-tool refresh || true
+fi
 
 # ---------- Secure Boot handling (MOK) ----------
 say "Checking Secure Boot/MOK status"
@@ -288,6 +322,7 @@ for rule in "${OLD_SCRIPT_RULES[@]}"; do
   fi
 done
 udevadm control --reload
+udevadm settle || true
 
 # ---------- Fix USB configuration and establish binding ----------
 fix_usb_configuration() {
@@ -316,6 +351,8 @@ modprobe r8152
 fix_usb_configuration || note "USB device not found or config already correct"
 
 # Check if device is already properly bound to r8152
+# Ensure any udev-triggered renames have completed before detection
+udevadm settle || true
 new_usb_if="$(detect_usb_if || true)"
 
 if [[ -n "${new_usb_if:-}" ]]; then
@@ -359,6 +396,7 @@ else
   
   # Retry up to 5 times with increasing delays to allow for binding and interface creation
   for attempt in 1 2 3 4 5; do
+    udevadm settle || true
     new_usb_if="$(detect_usb_if || true)"
     [[ -n "${new_usb_if:-}" ]] && break
     
@@ -403,6 +441,32 @@ else
   ip link set "$new_usb_if" up || true
   ifreload -a || true
   sleep 1
+fi
+
+# ---------- Restore vmbr0 to USB NIC if we pre-switched earlier ----------
+if $PRE_SWITCH_DONE; then
+  # Prefer the freshly detected r8152-bound interface; fall back to the previously detected one
+  restore_if="${new_usb_if:-${current_usb_if:-}}"
+  if [[ -n "${restore_if:-}" ]]; then
+    say "Restoring vmbr0 bridge-port to $restore_if"
+    set_vmbr0_port "$restore_if"
+
+    VMAC="$(cat /sys/class/net/"$restore_if"/address)"
+    # Only add hwaddress if not already present in vmbr0 block
+    if ! awk '
+      /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ { in_vmbr=1; next }
+      in_vmbr && /^[[:space:]]*hwaddress[[:space:]]+ether/ { found=1; exit 0 }
+      in_vmbr && (/^[[:space:]]*$/ || /^iface[[:space:]]+/ || /^auto[[:space:]]+/) { exit 1 }
+      END { exit (found ? 0 : 1) }
+    ' "$IFCFG"; then
+      sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${VMAC}" "$IFCFG"
+    fi
+
+    ifreload -a || true
+    sleep 2
+  else
+    note "USB NIC interface name not detected; leaving vmbr0 on $ONBOARD_IF"
+  fi
 fi
 
 # ---------- Summary report ----------
@@ -451,11 +515,17 @@ say "Summary"
   inblk { print }
   ' "$IFCFG"
   echo
-  echo "Driver details ($new_usb_if):"
-  ethtool -i "$new_usb_if" || true
+# Re-detect interface for summary in case names changed during udev settle
+summary_usb_if="$(detect_usb_if || true)"
+if [[ -n "${summary_usb_if:-}" ]]; then
+  echo "Driver details ($summary_usb_if):"
+  ethtool -i "$summary_usb_if" || true
   echo
-  echo "Link ($new_usb_if):"
-  ethtool "$new_usb_if" | sed -n '1,40p'
+  echo "Link ($summary_usb_if):"
+  ethtool "$summary_usb_if" | sed -n '1,40p'
+else
+  echo "USB NIC not detected at summary time"
+fi
 } | tee "$REPORT" | sed 's/^/    /'
 
 say "Done. Report saved to: $REPORT"
