@@ -22,6 +22,8 @@
 #
 # Re-run this script after kernel updates to refresh initramfs and verify binding.
 
+# TODO: TEST BEHAVIOUR AFTER UNINSTALL THE DEB
+
 set -euo pipefail
 
 # Verify running as root

@@ -9,6 +9,15 @@ If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](ht
 - If Secure Boot is enabled, you’ll be prompted to enroll the DKMS key (MOK) and reboot once; rerun the script after the reboot to complete.
 - Requires onboard NIC (default enp3s0) to be cabled during the switch so management stays up.
 
+### Bridge MAC address behavior (install/uninstall)
+- The scripts may pin the bridge MAC with a `hwaddress ether <mac>` line in the `vmbr0` stanza to avoid MAC flapping when switching `bridge-ports` between NICs.
+- Install:
+  - If missing, the installer may add `hwaddress` using the active interface MAC so `vmbr0` keeps a stable MAC when moving between USB and onboard ports.
+- Uninstall:
+  - If `hwaddress` equals the USB NIC’s MAC, the uninstall removes it when failing back to the onboard NIC (restores default: bridge MAC follows first enslaved port).
+  - If `hwaddress` does not equal the USB NIC’s MAC (e.g., pinned to onboard MAC), it is preserved for stability across reboots and port switches.
+- You can remove the `hwaddress` line if you prefer the bridge to adopt the active interface’s MAC automatically; keep it to maintain a stable, pinned MAC.
+
 ## Script Output
 <details>
   <summary>(click to expand) 📝</summary>
