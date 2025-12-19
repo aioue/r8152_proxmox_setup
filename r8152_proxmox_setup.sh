@@ -5,6 +5,7 @@
 #
 # One-shot, safe installer for Realtek r8152 DKMS on Proxmox VE 9 (Secure Boot aware)
 # - Uses awesometic .deb from /root/ or auto-fetches the latest from GitHub
+# - Installs headers and builds DKMS for all installed kernels (not just running)
 # - Preserves access by temporarily moving vmbr0 to onboard NIC (enp3s0) if needed
 # - Enrolls DKMS MOK for Secure Boot if not yet enrolled
 # - Blacklists cdc_* drivers so r8152 binds automatically
@@ -20,7 +21,8 @@
 # Secure Boot: will prompt to enroll MOK and reboot if enabled; rerun afterward.
 # Customize ONBOARD_IF_DEFAULT variable below if your onboard NIC has a different name.
 #
-# Re-run this script after kernel updates to refresh initramfs and verify binding.
+# Run this script after kernel upgrades to ensure DKMS is built for new kernels, initramfs is refreshed and binding is verified.
+# Safe to re-run: will skip already-installed components and verify configuration.
 
 # TODO: TEST BEHAVIOUR AFTER UNINSTALL THE DEB
 
@@ -31,8 +33,7 @@ set -euo pipefail
 
 DEB_DEFAULT="/root/realtek-r8152-dkms_2.20.1-1_amd64.deb"
 DEB_PATH="${1:-$DEB_DEFAULT}"
-ONBOARD_IF_DEFAULT="enp3s0"   # Adjust if your onboard NIC name differs
-ONBOARD_IF="${ONBOARD_IF_DEFAULT}"
+ONBOARD_IF="enp3s0"   # Adjust if your onboard NIC name differs
 REPORT="/root/r8152_setup_report_$(date +%Y%m%d_%H%M%S).txt"
 KREL="$(uname -r)"
 
@@ -74,6 +75,21 @@ set_vmbr0_port() {
     inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " p}
     {print}
   ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+}
+
+# Ensure vmbr0 has hwaddress set to preserve MAC across reboots
+ensure_vmbr0_hwaddress() {
+  local iface="$1" mac
+  mac="$(cat /sys/class/net/"$iface"/address)"
+  # Only add hwaddress if not already present in vmbr0 stanza
+  if ! awk '
+    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ { in_vmbr=1; next }
+    in_vmbr && /^[[:space:]]*hwaddress[[:space:]]+ether/ { found=1; exit 0 }
+    in_vmbr && (/^[[:space:]]*$/ || /^iface[[:space:]]+/ || /^auto[[:space:]]+/) { exit 1 }
+    END { exit (found ? 0 : 1) }
+  ' "$IFCFG"; then
+    sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${mac}" "$IFCFG"
+  fi
 }
 
 # ---------- fetch latest .deb from GitHub ----------
@@ -127,7 +143,7 @@ detect_usb_if() {
     [[ -e "$n/device" ]] || continue
     DEVLINK="$(readlink -f "$n"/device || true)"
     [[ "$DEVLINK" == *"/usb"* ]] || continue
-    
+
     # USB device attributes (idVendor/idProduct) may be in parent directories
     # Walk up the tree (bounded to 3 levels) to find them
     USB_DEV="$DEVLINK"
@@ -135,7 +151,7 @@ detect_usb_if() {
       [[ -r "$USB_DEV/idVendor" ]] && break
       USB_DEV="$(dirname "$USB_DEV")"
     done
-    
+
     if [[ -r "$USB_DEV/idVendor" && -r "$USB_DEV/idProduct" ]]; then
       v=$(cat "$USB_DEV/idVendor"); p=$(cat "$USB_DEV/idProduct")
       if [[ "$v:$p" == "$USB_VENDOR:$USB_PRODUCT" ]]; then
@@ -183,7 +199,7 @@ else
       die "Onboard interface $ONBOARD_IF has no link (cable unplugged?). Cannot safely switch bridge if needed. Connect $ONBOARD_IF and rerun."
     fi
     note "Onboard interface $ONBOARD_IF has link - failover path available"
-    
+
     # Keep it up since we verified link - we may need it for bridge failover
     note "Keeping $ONBOARD_IF up for potential failover use"
   else
@@ -229,11 +245,45 @@ else
   note "vmbr0 already on $ONBOARD_IF (or no change needed)."
 fi
 
+# ---------- Detect all installed Proxmox kernels ----------
+# Returns list of kernel versions that have modules installed
+get_installed_kernels() {
+  local kver
+  for kdir in /lib/modules/*-pve; do
+    [[ -d "$kdir" ]] || continue
+    kver="$(basename "$kdir")"
+    # Verify it's a real kernel installation (has kernel directory)
+    [[ -d "$kdir/kernel" ]] && echo "$kver"
+  done
+}
+
 # ---------- Install headers, DKMS package ----------
 say "Installing headers, DKMS, and the r8152 DKMS package"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y || true
+
+# Install base requirements and headers for running kernel first
 apt-get install -y dkms build-essential "proxmox-headers-$KREL"
+
+# Install headers for ALL installed kernels (prevents DKMS skip on new kernels)
+say "Ensuring headers are installed for all Proxmox kernels"
+INSTALLED_KERNELS="$(get_installed_kernels)"
+HEADER_INSTALL_FAILED=()
+for kver in $INSTALLED_KERNELS; do
+  HEADER_PKG="proxmox-headers-${kver}"
+  if dpkg -l "$HEADER_PKG" 2>/dev/null | grep -q '^ii'; then
+    note "Headers already installed: $HEADER_PKG"
+  else
+    note "Installing headers: $HEADER_PKG"
+    if ! apt-get install -y "$HEADER_PKG" 2>/dev/null; then
+      # Header package may not exist (e.g., very old kernel being removed)
+      note "Warning: Could not install $HEADER_PKG (may not be available)"
+      HEADER_INSTALL_FAILED+=("$kver")
+    fi
+  fi
+done
+
+# Install the DKMS package (will auto-build for kernels with headers)
 apt-get install -y "$DEB_PATH"
 
 say "Verifying DKMS installation"
@@ -242,7 +292,36 @@ if ! dkms status | grep -E 'r8152|realtek-r8152' >/dev/null; then
   modinfo r8152 2>/dev/null | sed -n '1,8p' | sed 's/^/    /' || true
   die "DKMS installation failed. See in-kernel module info above."
 fi
-modinfo r8152 | sed -n '1,8p' | sed 's/^/    /' || true
+
+# Get the installed DKMS module version
+DKMS_VERSION="$(dkms status | grep -E 'r8152|realtek-r8152' | head -1 | sed -E 's/.*\/([0-9.]+).*/\1/')"
+note "DKMS module version: $DKMS_VERSION"
+
+# Ensure DKMS is built for ALL kernels with headers (catches kernels installed after initial setup)
+say "Ensuring DKMS module is built for all kernels"
+for kver in $INSTALLED_KERNELS; do
+  # Skip kernels where headers failed to install
+  if [[ " ${HEADER_INSTALL_FAILED[*]:-} " == *" $kver "* ]]; then
+    note "Skipping $kver (headers not available)"
+    continue
+  fi
+
+  # Check if module is already installed for this kernel
+  if dkms status -k "$kver" 2>/dev/null | grep -qE 'realtek-r8152.*installed'; then
+    note "DKMS already installed for $kver"
+  else
+    note "Building DKMS for $kver"
+    # Try to build and install; may fail if headers incomplete
+    if dkms build "realtek-r8152/$DKMS_VERSION" -k "$kver" 2>/dev/null; then
+      dkms install "realtek-r8152/$DKMS_VERSION" -k "$kver" 2>/dev/null || true
+    else
+      note "Warning: DKMS build failed for $kver (check kernel compatibility)"
+    fi
+  fi
+done
+
+# Show current DKMS state
+dkms status | grep -E 'r8152|realtek-r8152' | sed 's/^/    /' || true
 
 # ---------- Blacklist competing USB net drivers and refresh initramfs ----------
 say "Blacklisting competing drivers and updating initramfs"
@@ -307,33 +386,16 @@ else
   note "Secure Boot disabled or unsupported by mokutil."
 fi
 
-# ---------- Clean up udev rules created by old versions of this script ----------
-say "Removing udev rules from previous script versions"
-# Old versions of this script created manual binding rules that are unnecessary
-# and can fail at boot. With awesometic's config-setting rule, blacklist, and
-# initramfs, the kernel auto-binds r8152 without manual intervention.
-OLD_SCRIPT_RULES=(
-  "/etc/udev/rules.d/99-r8152-rtl8157-bind.rules"
-)
-for rule in "${OLD_SCRIPT_RULES[@]}"; do
-  if [[ -f "$rule" ]]; then
-    note "Removing old script rule: $rule"
-    rm -f "$rule"
-  fi
-done
-udevadm control --reload
-udevadm settle || true
-
 # ---------- Fix USB configuration and establish binding ----------
 fix_usb_configuration() {
   # Realtek USB adapters support multiple USB configurations (modes)
   # Configuration 1: r8152 proprietary mode (best performance, 5G support)
   # Configuration 2/3: CDC NCM/ECM mode (generic, lower performance)
   # The awesometic udev rules set this, but we need to ensure it's correct
-  
+
   local usb_dev current_config
   usb_dev="$(find_realtek_usb_device)" || return 1
-  
+
   current_config=$(cat "$usb_dev/bConfigurationValue" 2>/dev/null || echo "0")
   if [[ "$current_config" != "1" ]]; then
     note "Setting USB configuration to 1 for r8152 mode (was: $current_config)"
@@ -362,14 +424,14 @@ if [[ -n "${new_usb_if:-}" ]]; then
 else
   # Device not bound to r8152 - need replug for initial setup
   # Only now do we need to switch bridge to onboard for safety
-  
+
   say "USB NIC not currently bound to r8152 - initial setup required"
-  
+
   # Get current bridge port and switch to onboard if needed
   vmbr_port="$(get_vmbr0_port)"
-  
+
   note "vmbr0 current bridge-port: ${vmbr_port:-<none>}"
-  
+
   if [[ -n "${vmbr_port:-}" && "$vmbr_port" != "$ONBOARD_IF" ]]; then
     say "Temporarily switching vmbr0 bridge-port to $ONBOARD_IF for safety during replug"
     set_vmbr0_port "$ONBOARD_IF"
@@ -379,34 +441,34 @@ else
   else
     note "vmbr0 already on $ONBOARD_IF (or no change needed)."
   fi
-  
+
   # Ensure interface definitions exist
   grep -q "^iface ${ONBOARD_IF} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$ONBOARD_IF" >>"$IFCFG"
   if [[ -n "${current_usb_if:-}" ]]; then
     grep -q "^iface ${current_usb_if} inet" "$IFCFG" || printf "\niface %s inet manual\n" "$current_usb_if" >>"$IFCFG"
   fi
-  
+
   say "ACTION REQUIRED: Unplug and replug the Realtek USB 5G NIC now, then press Enter."
   read -r -p "Press Enter after replug..."
-  
+
   # Detect USB NIC after replug with retry logic
   say "Detecting the USB NIC and verifying binding"
   lsusb -t | sed 's/^/    /'
   sleep 1
-  
+
   # Retry up to 5 times with increasing delays to allow for binding and interface creation
   for attempt in 1 2 3 4 5; do
     udevadm settle || true
     new_usb_if="$(detect_usb_if || true)"
     [[ -n "${new_usb_if:-}" ]] && break
-    
+
     if [[ $attempt -lt 5 ]]; then
       note "No interface shows driver=r8152 yet; retry $attempt/4 after ${attempt}s..."
       sleep "$attempt"
       lsusb -t | sed 's/^/    /'
     fi
   done
-  
+
   if [[ -z "${new_usb_if:-}" ]]; then
     echo "ERROR: USB NIC did not bind to r8152 after replug." >&2
     echo "Possible causes:" >&2
@@ -416,31 +478,17 @@ else
     echo "  - Try waiting 30 seconds for STP convergence, then rerun" >&2
     exit 1
   fi
-  
+
   say "USB NIC bound to r8152 on interface: $new_usb_if"
   ethtool -i "$new_usb_if" | sed 's/^/    /'
-  
+
   # ---------- Restore vmbr0 to the USB NIC ----------
   say "Restoring vmbr0 bridge-port to $new_usb_if"
   set_vmbr0_port "$new_usb_if"
-  
-  VMAC="$(cat /sys/class/net/"$new_usb_if"/address)"
-  # Only add hwaddress if not already present in vmbr0 block
-  # Check for hwaddress in vmbr0 stanza only (between vmbr0 start and next blank line or next iface)
-  if ! awk '
-    /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ { in_vmbr=1; next }
-    in_vmbr && /^[[:space:]]*hwaddress[[:space:]]+ether/ { found=1; exit 0 }
-    in_vmbr && (/^[[:space:]]*$/ || /^iface[[:space:]]+/ || /^auto[[:space:]]+/) { exit 1 }
-    END { exit (found ? 0 : 1) }
-  ' "$IFCFG"; then
-    sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${VMAC}" "$IFCFG"
-  fi
-  
+  ensure_vmbr0_hwaddress "$new_usb_if"
+
   ifreload -a || true
   sleep 2
-  ip link set "$new_usb_if" up || true
-  ifreload -a || true
-  sleep 1
 fi
 
 # ---------- Restore vmbr0 to USB NIC if we pre-switched earlier ----------
@@ -450,18 +498,7 @@ if $PRE_SWITCH_DONE; then
   if [[ -n "${restore_if:-}" ]]; then
     say "Restoring vmbr0 bridge-port to $restore_if"
     set_vmbr0_port "$restore_if"
-
-    VMAC="$(cat /sys/class/net/"$restore_if"/address)"
-    # Only add hwaddress if not already present in vmbr0 block
-    if ! awk '
-      /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ { in_vmbr=1; next }
-      in_vmbr && /^[[:space:]]*hwaddress[[:space:]]+ether/ { found=1; exit 0 }
-      in_vmbr && (/^[[:space:]]*$/ || /^iface[[:space:]]+/ || /^auto[[:space:]]+/) { exit 1 }
-      END { exit (found ? 0 : 1) }
-    ' "$IFCFG"; then
-      sed -i "/^iface vmbr0 inet static/a\        hwaddress ether ${VMAC}" "$IFCFG"
-    fi
-
+    ensure_vmbr0_hwaddress "$restore_if"
     ifreload -a || true
     sleep 2
   else
