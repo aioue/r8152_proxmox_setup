@@ -11,6 +11,43 @@
 
 set -euo pipefail
 
+VERSION="1.0.0"
+
+show_help() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Uninstall Realtek r8152 DKMS driver and revert changes on Proxmox VE 9.
+
+Options:
+  -h, --help              Show this help message and exit
+  -V, --version           Show version and exit
+  --onboard-if=NAME       Specify onboard interface for failover (default: enp3s0)
+  --switch-back-to-usb    After uninstall, switch vmbr0 back to USB NIC
+                          (uses in-kernel r8152 driver)
+
+Examples:
+  $(basename "$0")                              # Standard uninstall
+  $(basename "$0") --onboard-if=eth0            # Custom onboard NIC
+  $(basename "$0") --switch-back-to-usb         # Restore USB NIC as bridge port
+
+Notes:
+  - Requires root privileges
+  - Onboard NIC must be cabled for failover safety during uninstall
+  - Does not revoke Secure Boot MOK (manual operation if needed)
+  - In-kernel r8152 driver will still bind after uninstall
+EOF
+  exit 0
+}
+
+# Parse early flags before other processing
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)    show_help ;;
+    -V|--version) echo "r8152_proxmox_uninstall.sh version $VERSION"; exit 0 ;;
+  esac
+done
+
 # Keep running if SSH disconnects during brief network flaps
 trap '' SIGHUP
 
@@ -66,14 +103,19 @@ get_vmbr0_port() {
   ' "$IFCFG"
 }
 
+# Set bridge-port for vmbr0 in /etc/network/interfaces
+# Uses cp -a to preserve original file permissions and ownership
 set_vmbr0_port() {
-  local port="$1"
+  local port="$1" tmpf
+  tmpf="$(mktemp "${IFCFG}.XXXXXX")"
+  # Preserve permissions/ownership from original
+  cp -a "$IFCFG" "$tmpf"
   awk -v p="$port" '
     BEGIN{inbr=0}
     /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
     inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " p}
     {print}
-  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+  ' "$IFCFG" > "$tmpf" && mv "$tmpf" "$IFCFG"
 }
 
 ensure_onboard_failover_ready() {
@@ -360,5 +402,3 @@ main() {
 }
 
 main "$@"
-
-

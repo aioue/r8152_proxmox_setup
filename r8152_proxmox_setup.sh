@@ -13,27 +13,89 @@
 # - Ensures USB device is in correct configuration mode (config 1)
 # - Removes conflicting manual udev rules that can cause boot failures
 # - Guides you to unplug/replug once if initial binding needed
-# - Restores vmbr0 to the USB NIC and prints a concise report
+# - Restores vmbr0 to the USB NIC and prints a report
 #
 # Requirements: PVE 9 with ifupdown2, onboard NIC cabled as backup (default: enp3s0)
 # awesometic (https://github.com/awesometic/realtek-r8152-dkms) .deb at /root/realtek-r8152-dkms_2.20.1-1_amd64.deb
 # (or pass path), OR allow script to auto-download latest release. Brief ifreload flap.
 # Secure Boot: will prompt to enroll MOK and reboot if enabled; rerun afterward.
-# Customize ONBOARD_IF_DEFAULT variable below if your onboard NIC has a different name.
+# Customize ONBOARD_IF variable below if your onboard NIC has a different name.
 #
 # Run this script after kernel upgrades to ensure DKMS is built for new kernels, initramfs is refreshed and binding is verified.
 # Safe to re-run: will skip already-installed components and verify configuration.
 
-# TODO: TEST BEHAVIOUR AFTER UNINSTALL THE DEB
+# TODO: TEST BEHAVIOUR AFTER UNINSTALLING THE DEB
 
 set -euo pipefail
+
+VERSION="1.0.0"
+
+show_help() {
+  cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [DEB_PATH]
+
+Install Realtek r8152 DKMS driver on Proxmox VE 9 with Secure Boot support.
+
+Options:
+  -h, --help              Show this help message and exit
+  -V, --version           Show version and exit
+  --onboard-if=NAME       Specify onboard interface for failover (default: enp3s0)
+
+Arguments:
+  DEB_PATH                Path to realtek-r8152-dkms .deb file (optional)
+                          If not provided, uses /root/realtek-r8152-dkms_*.deb or
+                          auto-fetches the latest release from GitHub.
+
+Examples:
+  $(basename "$0")                              # Auto-fetch latest .deb
+  $(basename "$0") /root/my-r8152.deb           # Use specific .deb
+  $(basename "$0") --onboard-if=eth0            # Custom onboard NIC
+
+Notes:
+  - Requires root privileges
+  - Onboard NIC must be cabled for failover safety during installation
+  - If Secure Boot is enabled, you may need to enroll MOK and reboot
+  - Safe to re-run after kernel upgrades
+EOF
+  exit 0
+}
+
+# Parse early flags before other processing
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)    show_help ;;
+    -V|--version) echo "r8152_proxmox_setup.sh version $VERSION"; exit 0 ;;
+  esac
+done
 
 # Verify running as root
 [[ $EUID -eq 0 ]] || { echo "ERROR: This script must be run as root" >&2; exit 1; }
 
+# Defaults
 DEB_DEFAULT="/root/realtek-r8152-dkms_2.20.1-1_amd64.deb"
-DEB_PATH="${1:-$DEB_DEFAULT}"
-ONBOARD_IF="enp3s0"   # Adjust if your onboard NIC name differs
+ONBOARD_IF="enp3s0"
+DEB_PATH=""
+
+# Parse arguments
+for arg in "$@"; do
+  case "$arg" in
+    --onboard-if=*)
+      ONBOARD_IF="${arg#*=}"
+      ;;
+    -h|--help|-V|--version)
+      # Already handled above
+      ;;
+    *)
+      # Assume it's the DEB path if it looks like a file path
+      if [[ -z "$DEB_PATH" && "$arg" != -* ]]; then
+        DEB_PATH="$arg"
+      fi
+      ;;
+  esac
+done
+
+# Use default if no DEB_PATH provided
+[[ -z "$DEB_PATH" ]] && DEB_PATH="$DEB_DEFAULT"
 REPORT="/root/r8152_setup_report_$(date +%Y%m%d_%H%M%S).txt"
 KREL="$(uname -r)"
 
@@ -67,14 +129,18 @@ get_vmbr0_port() {
 }
 
 # Set bridge-port for vmbr0 in /etc/network/interfaces
+# Uses cp -a to preserve original file permissions and ownership
 set_vmbr0_port() {
-  local port="$1"
+  local port="$1" tmpf
+  tmpf="$(mktemp "${IFCFG}.XXXXXX")"
+  # Preserve permissions/ownership from original
+  cp -a "$IFCFG" "$tmpf"
   awk -v p="$port" '
     BEGIN{inbr=0}
     /^iface[[:space:]]+vmbr0[[:space:]]+inet[[:space:]]+/ {inbr=1}
     inbr==1 && /^[[:space:]]*bridge-ports[[:space:]]+/ {$0="        bridge-ports " p}
     {print}
-  ' "$IFCFG" > "${IFCFG}.tmp" && mv "${IFCFG}.tmp" "$IFCFG"
+  ' "$IFCFG" > "$tmpf" && mv "$tmpf" "$IFCFG"
 }
 
 # Ensure vmbr0 has hwaddress set to preserve MAC across reboots
@@ -194,7 +260,7 @@ else
 
   # Check link state - failover path must be viable if we need it
   if [[ -r "/sys/class/net/$ONBOARD_IF/carrier" ]]; then
-    CARRIER="$(cat /sys/class/net/$ONBOARD_IF/carrier 2>/dev/null || echo 0)"
+    CARRIER="$(cat /sys/class/net/"$ONBOARD_IF"/carrier 2>/dev/null || echo 0)"
     if [[ "$CARRIER" != "1" ]]; then
       die "Onboard interface $ONBOARD_IF has no link (cable unplugged?). Cannot safely switch bridge if needed. Connect $ONBOARD_IF and rerun."
     fi
@@ -246,14 +312,16 @@ else
 fi
 
 # ---------- Detect all installed Proxmox kernels ----------
-# Returns list of kernel versions that have modules installed
-get_installed_kernels() {
+# Populates INSTALLED_KERNELS array with kernel versions that have modules installed
+# shellcheck disable=SC2034  # INSTALLED_KERNELS used after this function
+populate_installed_kernels() {
+  INSTALLED_KERNELS=()
   local kver
   for kdir in /lib/modules/*-pve; do
     [[ -d "$kdir" ]] || continue
     kver="$(basename "$kdir")"
     # Verify it's a real kernel installation (has kernel directory)
-    [[ -d "$kdir/kernel" ]] && echo "$kver"
+    [[ -d "$kdir/kernel" ]] && INSTALLED_KERNELS+=("$kver")
   done
 }
 
@@ -267,9 +335,9 @@ apt-get install -y dkms build-essential "proxmox-headers-$KREL"
 
 # Install headers for ALL installed kernels (prevents DKMS skip on new kernels)
 say "Ensuring headers are installed for all Proxmox kernels"
-INSTALLED_KERNELS="$(get_installed_kernels)"
+populate_installed_kernels
 HEADER_INSTALL_FAILED=()
-for kver in $INSTALLED_KERNELS; do
+for kver in "${INSTALLED_KERNELS[@]}"; do
   HEADER_PKG="proxmox-headers-${kver}"
   if dpkg -l "$HEADER_PKG" 2>/dev/null | grep -q '^ii'; then
     note "Headers already installed: $HEADER_PKG"
@@ -299,7 +367,7 @@ note "DKMS module version: $DKMS_VERSION"
 
 # Ensure DKMS is built for ALL kernels with headers (catches kernels installed after initial setup)
 say "Ensuring DKMS module is built for all kernels"
-for kver in $INSTALLED_KERNELS; do
+for kver in "${INSTALLED_KERNELS[@]}"; do
   # Skip kernels where headers failed to install
   if [[ " ${HEADER_INSTALL_FAILED[*]:-} " == *" $kver "* ]]; then
     note "Skipping $kver (headers not available)"
@@ -449,7 +517,10 @@ else
   fi
 
   say "ACTION REQUIRED: Unplug and replug the Realtek USB 5G NIC now, then press Enter."
-  read -r -p "Press Enter after replug..."
+  if ! read -r -t 90 -p "Press Enter after replug (90s timeout)..."; then
+    echo  # newline after timeout
+    die "Timed out waiting for user input. Re-run the script after replugging."
+  fi
 
   # Detect USB NIC after replug with retry logic
   say "Detecting the USB NIC and verifying binding"
