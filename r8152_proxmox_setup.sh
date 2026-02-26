@@ -331,7 +331,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y || true
 
 # Install base requirements and headers for running kernel first
-apt-get install -y dkms build-essential "proxmox-headers-$KREL"
+# libdw-dev is required by gendwarfksyms on kernels >= 6.12 with CONFIG_GENDWARFKSYMS
+apt-get install -y dkms build-essential libdw-dev "proxmox-headers-$KREL"
 
 # Install headers for ALL installed kernels (prevents DKMS skip on new kernels)
 say "Ensuring headers are installed for all Proxmox kernels"
@@ -431,17 +432,16 @@ if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then
     note "Secure Boot is enabled and DKMS MOK not enrolled."
     MOK_KEY="/var/lib/dkms/mok.pub"
     if [[ -f "$MOK_KEY" ]]; then
-      say "Enrolling DKMS signing key now. You will be prompted to set a password."
-      # Try to import; check if it actually needs enrollment
-      MOK_OUTPUT="$(mokutil --import "$MOK_KEY" 2>&1)"
-      if echo "$MOK_OUTPUT" | grep -qi 'already enrolled'; then
+      # Check if the key is already pending or enrolled before prompting
+      if mokutil --test-key "$MOK_KEY" 2>&1 | grep -qi 'already enrolled'; then
         note "MOK key already enrolled (detection issue resolved)."
-      elif echo "$MOK_OUTPUT" | grep -qi 'password'; then
-        # Actual enrollment happened, reboot needed
+      else
+        say "Enrolling DKMS signing key now. You will be prompted to set a password."
+        note "Remember this password - you will need it at the MOK Manager screen after reboot."
+        # Run mokutil directly (not in subshell) so the password prompt is visible
+        mokutil --import "$MOK_KEY"
         say "Reboot required to complete MOK enrollment. After reboot, re-run this script with the same parameters."
         exit 0
-      else
-        note "MOK import status: $MOK_OUTPUT"
       fi
     else
       note "DKMS signing key not found at $MOK_KEY"
