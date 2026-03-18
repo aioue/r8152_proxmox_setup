@@ -2,6 +2,8 @@
 
 Gets USB dongles like the [Wisdpi WP-UT5 (RTL8157) 5GbE](https://www.wisdpi.com/products/wisdpi-usb-3-2-5g-ethernet-adapter-wp-ut5-wired-lan-network-connection-for-mac-os-linux-windows-backward-compatible-on-5g-2-5g-1g-100mbps-ideal-for-gaming) running cleanly on PVE 9 using the [awesometic](https://github.com/awesometic/realtek-r8152-dkms/) r8152 DKMS driver (`.deb` package), with Secure Boot MOK enrollment and automatic `cdc_*` blacklisting.
 
+ℹ️ [Reported working with the RTL8159 chipset as well, with detection modifcations](https://github.com/aioue/r8152_proxmox_setup/issues/5).
+
 If you move to kernels ≥ 6.16 and hit API changes, consider the [wget fork](https://github.com/wget/realtek-r8152-linux) of r8152 DKMS. With MOK already enrolled, it should load cleanly as well.
 
 **Notes**
